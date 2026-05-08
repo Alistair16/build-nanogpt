@@ -28,23 +28,25 @@ class CausalSelfAttention(nn.Module):
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         # nh is "number of heads", hs is "head size", and C (number of channels) = nh * hs
         # e.g. in GPT-2 (124M), n_head=12, hs=64, so nh*hs=C=768 channels in the Transformer
-        qkv = self.c_attn(x)
-        q, k, v = qkv.split(self.n_embd, dim=2)
+        qkv = self.c_attn(x) 
+        q, k, v = qkv.split(self.n_embd, dim=2) # Splits the tensor into three different matrices across the second dimension
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # flash attention
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+        # Transpose swaps out dimensions 1 and 2, so the vector becomes (B,T,nh, hs) .contiguous() creates a properly ordered memory layout
+        #.view() flattens out the last two dimensions C = nhead * head size
         # output projection
-        y = self.c_proj(y)
+        y = self.c_proj(y) # Linear layer 
         return y
 
 class MLP(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd)
-        self.gelu    = nn.GELU(approximate='tanh')
+        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd) # W in Wx+b, size of W is (c,d), where c is the first term and d is the second
+        self.gelu    = nn.GELU(approximate='tanh') # GELU is like a ReLU but there is no flat tail to begin with. Looks flat but is non-zero. Works better which is why it was used in GPT-2
         self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd)
         self.c_proj.NANOGPT_SCALE_INIT = 1
 
@@ -61,11 +63,11 @@ class Block(nn.Module):
         self.ln_1 = nn.LayerNorm(config.n_embd)
         self.attn = CausalSelfAttention(config)
         self.ln_2 = nn.LayerNorm(config.n_embd)
-        self.mlp = MLP(config)
+        self.mlp = MLP(config) # Feed forward layer
 
     def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
+        x = x + self.attn(self.ln_1(x)) # attention is where they exchange information and communicate
+        x = x + self.mlp(self.ln_2(x)) # Happens to each token individually
         return x
 
 @dataclass
@@ -80,13 +82,13 @@ class GPT(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.config = config
+        self.config = config #Input parameter containing model settings or hyperparameter
 
-        self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd),
+        self.transformer = nn.ModuleDict(dict( # Pytorch model that stores neural networks using dictionay style keys
+            wte = nn.Embedding(config.vocab_size, config.n_embd), # Creaates an embedding layer which is a lookup table
             wpe = nn.Embedding(config.block_size, config.n_embd),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f = nn.LayerNorm(config.n_embd),
+            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]), # Pytorch container that stores neural network modules
+            ln_f = nn.LayerNorm(config.n_embd), #Normalizes activations
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
@@ -112,10 +114,10 @@ class GPT(nn.Module):
         B, T = idx.size()
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
         # forward the token and posisition embeddings
-        pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # shape (T)
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # shape (T) # creates position indices
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (T, n_embd)
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (B, T, n_embd)
-        x = tok_emb + pos_emb
+        x = tok_emb + pos_emb # Does broadcasting for the pos_emb
         # forward the blocks of the transformer
         for block in self.transformer.h:
             x = block(x)
@@ -124,7 +126,7 @@ class GPT(nn.Module):
         logits = self.lm_head(x) # (B, T, vocab_size)
         loss = None
         if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1)) # By using logits.view(-1, logits.size(-1)), we are telling pytorch to infer the first dimension automatically
         return logits, loss
 
     @classmethod
@@ -144,11 +146,14 @@ class GPT(nn.Module):
         config_args['vocab_size'] = 50257 # always 50257 for GPT model checkpoints
         config_args['block_size'] = 1024 # always 1024 for GPT model checkpoints
         # create a from-scratch initialized minGPT model
-        config = GPTConfig(**config_args)
+        config = GPTConfig(**config_args) # unpacks the dictionary config_args into keyword arguments
         model = GPT(config)
-        sd = model.state_dict()
-        sd_keys = sd.keys()
+        sd = model.state_dict() # Dictionary containing model parameters and registered buffers
+        # stores linear layer weights, embedding tables, layer norm parameters, attention weights, buffers like masks
+        sd_keys = sd.keys() # gets all dictionary keys
         sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')] # discard this mask / buffer, not a param
+        # creates a new list ignoring keys that end with .attn.bias as it is not a learnable parameter like a causal mask buffer
+        # trying to compare model weights, load pre-trained checkpoints, copy parameters
 
         # init a huggingface/transformers model
         model_hf = GPT2LMHeadModel.from_pretrained(model_type)
@@ -239,14 +244,14 @@ class DataLoaderLite:
 
     def next_batch(self):
         B, T = self.B, self.T
-        buf = self.tokens[self.current_position : self.current_position+B*T+1]
+        buf = self.tokens[self.current_position : self.current_position+B*T+1] # Get current location to B*T+1
         x = (buf[:-1]).view(B, T) # inputs
         y = (buf[1:]).view(B, T) # targets
         # advance the position in the tensor
         self.current_position += B * T * self.num_processes
         # if loading the next batch would be out of bounds, advance to next shard
         if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
-            self.current_shard = (self.current_shard + 1) % len(self.shards)
+            self.current_shard = (self.current_shard + 1) % len(self.shards) # shard is a small piece of a larger dataset
             self.tokens = load_tokens(self.shards[self.current_shard])
             self.current_position = B * T * self.process_rank
         return x, y
@@ -309,7 +314,7 @@ else:
     if torch.cuda.is_available():
         device = "cuda"
     elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        device = "mps"
+        device = "mps" # this is the chip that macbooks use which can be used for computing
     print(f"using device: {device}")
 
 # added after video, pytorch can be serious about it's device vs. device_type distinction
