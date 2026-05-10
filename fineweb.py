@@ -31,6 +31,7 @@ enc = tiktoken.get_encoding("gpt2")
 eot = enc._special_tokens['<|endoftext|>'] # end of text token
 def tokenize(doc):
     # tokenizes a single document and returns a numpy array of uint16 tokens
+    # end of tokens starts the data as well
     tokens = [eot] # the special <|endoftext|> token delimits all documents
     tokens.extend(enc.encode_ordinary(doc["text"]))
     tokens_np = np.array(tokens)
