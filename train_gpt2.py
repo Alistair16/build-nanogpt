@@ -5,7 +5,7 @@ import inspect
 from dataclasses import dataclass
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
+from torch.nn import functional as F # contains activation functions such as relu, gelu, loss functions, pooling operations
 from hellaswag import render_example, iterate_examples
 # -----------------------------------------------------------------------------
 
@@ -15,7 +15,7 @@ class CausalSelfAttention(nn.Module):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd) # 3* config.n_emd because there are three matrices: query, key and value
         # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
         self.c_proj.NANOGPT_SCALE_INIT = 1
@@ -30,10 +30,15 @@ class CausalSelfAttention(nn.Module):
         # e.g. in GPT-2 (124M), n_head=12, hs=64, so nh*hs=C=768 channels in the Transformer
         qkv = self.c_attn(x) 
         q, k, v = qkv.split(self.n_embd, dim=2) # Splits the tensor into three different matrices across the second dimension
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs) 
+        # k.view() splits the C dimension into n_head, head size. Thus, the dimension of the matrix goes from (B,T,C) to (B,T,n_head,head_size)  where head_size is C//n_head
+        # .transpose(1,2) swaps dimensions 1 and 2, so the dimension becomes (B,n_head, T, head_size)
+        # this is done because attention is computed independently for each head and the pytorch implementation is faster/easier if the head dimenstion comes before sequence length
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # flash attention
+        # xomputes the self_attention operation (optimized for pytorch)
+        # is_causal applies the causal masking where future tokens are masked out
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
         # Transpose swaps out dimensions 1 and 2, so the vector becomes (B,T,nh, hs) .contiguous() creates a properly ordered memory layout
         #.view() flattens out the last two dimensions C = nhead * head size
@@ -46,8 +51,9 @@ class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd) # W in Wx+b, size of W is (c,d), where c is the first term and d is the second
+        # factor of 4 came from the original transformer paper and was then used by convention
         self.gelu    = nn.GELU(approximate='tanh') # GELU is like a ReLU but there is no flat tail to begin with. Looks flat but is non-zero. Works better which is why it was used in GPT-2
-        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd)
+        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd) 
         self.c_proj.NANOGPT_SCALE_INIT = 1
 
     def forward(self, x):
@@ -60,13 +66,15 @@ class Block(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.ln_1 = nn.LayerNorm(config.n_embd)
+        self.ln_1 = nn.LayerNorm(config.n_embd) # layer normalization applied before the multi-head attention layer
         self.attn = CausalSelfAttention(config)
-        self.ln_2 = nn.LayerNorm(config.n_embd)
+        self.ln_2 = nn.LayerNorm(config.n_embd) # layer normalization applied before the feed forward layer
         self.mlp = MLP(config) # Feed forward layer
 
     def forward(self, x):
+        # Perform the normalization, apply the attention layer and then use skip connection
         x = x + self.attn(self.ln_1(x)) # attention is where they exchange information and communicate
+        # Pefrom the normalization, apply the feed forward layer and then use skip connection
         x = x + self.mlp(self.ln_2(x)) # Happens to each token individually
         return x
 
@@ -85,27 +93,29 @@ class GPT(nn.Module):
         self.config = config #Input parameter containing model settings or hyperparameter
 
         self.transformer = nn.ModuleDict(dict( # Pytorch model that stores neural networks using dictionay style keys
-            wte = nn.Embedding(config.vocab_size, config.n_embd), # Creaates an embedding layer which is a lookup table
-            wpe = nn.Embedding(config.block_size, config.n_embd),
+            wte = nn.Embedding(config.vocab_size, config.n_embd), # Creates an token embedding layer which is a lookup table
+            wpe = nn.Embedding(config.block_size, config.n_embd), # positional embedding
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]), # Pytorch container that stores neural network modules
             ln_f = nn.LayerNorm(config.n_embd), #Normalizes activations
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
         # weight sharing scheme
-        self.transformer.wte.weight = self.lm_head.weight
+        self.transformer.wte.weight = self.lm_head.weight # sets the head layer and the token embedding layer to have the same weights 
 
         # init params
         self.apply(self._init_weights)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
-            std = 0.02
+            std = 0.02 # sets the standard deviation to be 0.02
             if hasattr(module, 'NANOGPT_SCALE_INIT'):
-                std *= (2 * self.config.n_layer) ** -0.5
+                # multiplies the std by this number to variance to 1 even if we have multiple layers. Keep the activations stable even if we have multiple layers
+                # Used for residual layers
+                std *= (2 * self.config.n_layer) ** -0.5 
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
             if module.bias is not None:
-                torch.nn.init.zeros_(module.bias)
+                torch.nn.init.zeros_(module.bias) # Biases are initialized to zero
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
@@ -122,7 +132,7 @@ class GPT(nn.Module):
         for block in self.transformer.h:
             x = block(x)
         # forward the final layernorm and the classifier
-        x = self.transformer.ln_f(x)
+        x = self.transformer.ln_f(x) # Normalizes the activations before the final linar projection (lm_head is applied)
         logits = self.lm_head(x) # (B, T, vocab_size)
         loss = None
         if targets is not None:
@@ -156,8 +166,9 @@ class GPT(nn.Module):
         # trying to compare model weights, load pre-trained checkpoints, copy parameters
 
         # init a huggingface/transformers model
+        # Creates a GPT2 model, downloads pretrained weights from hugging face and loads them into the model depending on the model_type chosen
         model_hf = GPT2LMHeadModel.from_pretrained(model_type)
-        sd_hf = model_hf.state_dict()
+        sd_hf = model_hf.state_dict() # Extracs the model parameters into a standard python dictionary
 
         # copy while ensuring all of the parameters are aligned and match in names and shapes
         sd_keys_hf = sd_hf.keys()
