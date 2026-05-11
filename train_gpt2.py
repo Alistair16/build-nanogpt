@@ -174,16 +174,20 @@ class GPT(nn.Module):
         sd_keys_hf = sd_hf.keys()
         sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.masked_bias')] # ignore these, just a buffer
         sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.bias')] # same, just the mask (buffer)
+        #Create a python list of parameter names and store it into a string
+        # For these layers we need to transpose them before we use them. They are stored in a different format in the pretrained weights
         transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
         # basically the openai checkpoints use a "Conv1D" module, but we only want to use a vanilla Linear
         # this means that we have to transpose these weights when we import them
-        assert len(sd_keys_hf) == len(sd_keys), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
+
+        assert len(sd_keys_hf) == len(sd_keys), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}" # Makes sure that the hugging face model and our nanogpt model has the same number of parameters
+        
         for k in sd_keys_hf:
             if any(k.endswith(w) for w in transposed):
                 # special treatment for the Conv1D weights we need to transpose
-                assert sd_hf[k].shape[::-1] == sd[k].shape
-                with torch.no_grad():
-                    sd[k].copy_(sd_hf[k].t())
+                assert sd_hf[k].shape[::-1] == sd[k].shape # sd_hf[k].shape[::-1]: reverses the dimension order by no data is changed
+                with torch.no_grad(): # disable gradient tracking. Avoids storing computation graphs, speeds up assignment and ensures that it is treated as a raw parameter copy, not a training operation
+                    sd[k].copy_(sd_hf[k].t()) # sd_hf[k].t(): takes the hugging face parameter and transposes it
             else:
                 # vanilla copy over the other parameters
                 assert sd_hf[k].shape == sd[k].shape
@@ -194,8 +198,9 @@ class GPT(nn.Module):
 
     def configure_optimizers(self, weight_decay, learning_rate, device_type):
         # start with all of the candidate parameters (that require grad)
-        param_dict = {pn: p for pn, p in self.named_parameters()}
-        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+        # build a parameter dictionary where pn (parameter name), p parameter tensor. Dictionary helps look up parameters by name
+        param_dict = {pn: p for pn, p in self.named_parameters()} # self.named_parameters() is a pytorch method that returns pn (parameter name) and p (parameter tensor)
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad} # p.requires_grad: when a parameter is created it is trainable by default, so this line picks out only those parameters
         # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
         # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
         decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
