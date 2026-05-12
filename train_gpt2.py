@@ -203,20 +203,22 @@ class GPT(nn.Module):
         param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad} # p.requires_grad: when a parameter is created it is trainable by default, so this line picks out only those parameters
         # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
         # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
-        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2] #Add the parameter to the decay_params list only is 
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2] # Add the parameter to the decay_params list only is 
         nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
         optim_groups = [
             {'params': decay_params, 'weight_decay': weight_decay},
             {'params': nodecay_params, 'weight_decay': 0.0}
         ]
-        num_decay_params = sum(p.numel() for p in decay_params)
+        num_decay_params = sum(p.numel() for p in decay_params) # p.numel() gives the number of elements in the matrix. Computes the total number of weights in the decay group
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
         if master_process:
-            print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+            print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters") #prints the number of decay tensors with number of parameters/ weights
             print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
         # Create AdamW optimizer and use the fused version if it is available
-        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and device_type == "cuda"
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters # Does this version of pytorch support the fused argument
+        use_fused = fused_available and device_type == "cuda" # fused version is used only if it is present in AdamW and we are going to use a GPU
+
+        \]]
         if master_process:
             print(f"using fused AdamW: {use_fused}")
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
@@ -227,9 +229,9 @@ import tiktoken
 import numpy as np
 
 def load_tokens(filename):
-    npt = np.load(filename)
-    npt = npt.astype(np.int32) # added after video
-    ptt = torch.tensor(npt, dtype=torch.long)
+    npt = np.load(filename) # load the data as a num py array
+    npt = npt.astype(np.int32) # added after video # convert the data type to 32 bit integer strings
+    ptt = torch.tensor(npt, dtype=torch.long) # convert the numpy array into a pytorch tensor with a 64 bit integer token
     return ptt
 
 class DataLoaderLite:
@@ -242,21 +244,21 @@ class DataLoaderLite:
 
         # get the shard filenames
         data_root = "edu_fineweb10B"
-        shards = os.listdir(data_root)
-        shards = [s for s in shards if split in s]
-        shards = sorted(shards)
-        shards = [os.path.join(data_root, s) for s in shards]
+        shards = os.listdir(data_root) # List all the files present in the directory data_root
+        shards = [s for s in shards if split in s] # If the file has 'train' or 'val' in their names, keep the file
+        shards = sorted(shards) 
+        shards = [os.path.join(data_root, s) for s in shards] # convert filenames into full path
         self.shards = shards
         assert len(shards) > 0, f"no shards found for split {split}"
         if master_process:
-            print(f"found {len(shards)} shards for split {split}")
+            print(f"found {len(shards)} shards for split {split}") # print the number of shards found in the master_process (the main process among the many parallel processes
         self.reset()
 
     def reset(self):
         # state, init at shard zero
-        self.current_shard = 0
-        self.tokens = load_tokens(self.shards[self.current_shard])
-        self.current_position = self.B * self.T * self.process_rank
+        self.current_shard = 0 # Starts from the first data shard in the dataset list
+        self.tokens = load_tokens(self.shards[self.current_shard]) # Load the tokenized dataset into the memory
+        self.current_position = self.B * self.T * self.process_rank # Assign each distributed process a unique starting position
 
     def next_batch(self):
         B, T = self.B, self.T
@@ -264,12 +266,12 @@ class DataLoaderLite:
         x = (buf[:-1]).view(B, T) # inputs
         y = (buf[1:]).view(B, T) # targets
         # advance the position in the tensor
-        self.current_position += B * T * self.num_processes
+        self.current_position += B * T * self.num_processes # advance the current position to after this point. This is done to make sure the datasets in different processors do not overlap
         # if loading the next batch would be out of bounds, advance to next shard
         if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
             self.current_shard = (self.current_shard + 1) % len(self.shards) # shard is a small piece of a larger dataset
-            self.tokens = load_tokens(self.shards[self.current_shard])
-            self.current_position = B * T * self.process_rank
+            self.tokens = load_tokens(self.shards[self.current_shard]) # Load the shard
+            self.current_position = B * T * self.process_rank # Reset the position for this process
         return x, y
 
 # -----------------------------------------------------------------------------
